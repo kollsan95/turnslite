@@ -1,0 +1,1 @@
+{"subnet_mask": "255.255.255.0", "pin_cfg": "GP18", "dhcp": 1, "target_port": 3000, "api_path": "/api/validate/999", "gateway": "192.168.100.1", "uart_rx": "GP21", "admin_code": "admin", "baudrate": 115200, "pin_rst": "GP19", "admin_pass": "12345", "uart_tx": "GP20", "target_ip": "192.168.100.70", "local_ip": "0.0.0.0"}
