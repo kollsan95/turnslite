@@ -91,22 +91,25 @@ class BarcodeScanner:
             print(f"[SCANNER ERROR] Unexpected read error: {e}")
             return ""
         
-    def try_read_scan(self, timeout: float = 0.5) -> str | None:
+    def try_read_scan(self) -> str | None:
         """
-        Read one line (terminated by '\n') with a timeout.
-        Returns stripped line if a complete line is received within timeout,
-        otherwise returns None.
+        Non‑blocking attempt to read one complete line (terminated by '\\r').
+        Returns the stripped line if a full line is available, otherwise None.
+        Does NOT wait for data.
         """
-        start = time.monotonic()
-        chars = []
-        while (time.monotonic() - start) < timeout:
-            if supervisor.runtime.serial_bytes_available > 0:
-                ch = sys.stdin.read(1)
-                if ch == '\n':
-                    return ''.join(chars).strip()
-                else:
-                    chars.append(ch)
-            # optional small sleep to reduce CPU usage
-            time.sleep(0.02)
-        return None
+        if supervisor.runtime.serial_bytes_available == 0:
+            return None
 
+        # Peek at the buffer without consuming? We have to read.
+        # We'll read byte by byte until we hit '\\r' or run out of data.
+        # Accumulate bytes in a list.
+        chars = []
+        while supervisor.runtime.serial_bytes_available > 0:
+            ch = sys.stdin.read(1)
+            if ch == '\r' or '\n':
+                # End of line found – consume and return
+                return ''.join(chars).strip()
+            else:
+                chars.append(ch)
+        # No complete line yet
+        return None

@@ -75,7 +75,25 @@ class AppCore:
 
         # State variables
         self.system_state = "WORK"          # WORK / WAIT_PASS / ADMIN
-        self.password_timer = 5.0           # Monotonic timestamp for 5s timeout
+        self.password_timer = 0.0           # Monotonic timestamp for 5s timeout
+
+    # -------------------------------------------------------------------------
+    # Helper: timeout handler for WAIT_PASS state
+    # -------------------------------------------------------------------------
+    def _handle_password_timeout(self) -> bool:
+        """
+        Check if 5 seconds have elapsed while waiting for admin password.
+        On timeout: return to WORK, flash relays, flush input buffer.
+        Returns True if timeout occurred (caller should restart loop).
+        """
+        if self.system_state == "WAIT_PASS":
+            if (time.monotonic() - self.password_timer) > 5.0:
+                print("❌ [SECURITY]: Password timeout!")
+                self.system_state = "WORK"
+                self.peripherals.set_led_closed()
+                self.peripherals.trigger_admin_declined()
+                return True
+        return False
 
     # -------------------------------------------------------------------------
     # State handlers
@@ -87,8 +105,8 @@ class AppCore:
         """
         if scanned_code == admin_login:
             self.system_state = "WAIT_PASS"
+            self.password_timer = time.monotonic()
             self.peripherals.set_led_admin()        # Purple / admin LED
-            
         else:
             self.peripherals.set_led_processing()   # Yellow LED
             print(f"🎫 [TICKET]: '{scanned_code}'")
@@ -124,6 +142,7 @@ class AppCore:
             self.system_state = "WORK"
             self.peripherals.set_led_color(40, 0, 0)           # Solid red
             # Flush any remaining input (partial lines, extra CR)
+            self.scanner.flush_buffer()
             self.peripherals.trigger_admin_declined()
 
     def _process_admin_mode(self, scanned_code: str, admin_password: str) -> None:
@@ -146,6 +165,7 @@ class AppCore:
             else:
                 print("❌ [ADMIN]: Configuration validation failed.")
                 # Flush potentially malformed data that might be stuck
+                self.scanner.flush_buffer()
                 self.peripherals.trigger_admin_declined()
 
     # -------------------------------------------------------------------------
@@ -162,22 +182,28 @@ class AppCore:
         admin_password = str(self.cfg.get("admin_pass", "12345")).strip()
 
         while True:
-            if self.system_state == "WAIT_PASS":
-                password = self.scanner.try_read_scan(self.password_timer)
-                self._process_wait_pass_mode(password, admin_password)
-                
+            # Always start by discarding any residual noise (e.g., spurious CR)
+            self.scanner.flush_buffer()
+
+            # Check timeout if we are in WAIT_PASS state
+            if self.system_state != "WORK":
+                if self._handle_password_timeout():
+                    continue   # Timeout occurred, restart the loop
+
             if self.system_state == "WORK":
-                # Always start by discarding any residual noise (e.g., spurious CR)
-                self.scanner.flush_buffer()
                 # ----- BLOCKING read (perfect for WORK mode) -----
                 scanned_code = self.scanner.wait_for_scan()
                 if scanned_code:
                     self._process_work_mode(scanned_code, admin_login)
-                    
-            elif self.system_state == "ADMIN":
-                scanned_code = self.scanner.try_read_scan(30.0)
-                self._process_admin_mode(scanned_code, admin_password)
-                
+            else:
+                # ----- NON‑BLOCKING read for WAIT_PASS and ADMIN -----
+                scanned_code = self.scanner.try_read_scan()
+                if scanned_code is not None:
+                    if self.system_state == "WAIT_PASS":
+                        self._process_wait_pass_mode(scanned_code, admin_password)
+                    elif self.system_state == "ADMIN":
+                        self._process_admin_mode(scanned_code, admin_password)
+
 if __name__ == "__main__":
     app = AppCore()
     app.run()
