@@ -181,3 +181,4 @@ class AppCore:
 if __name__ == "__main__":
     app = AppCore()
     app.run()
+    
