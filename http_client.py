@@ -104,12 +104,8 @@ class NetworkHttpClient:
                     break
 
         # --- 5. Debug output ------------------------------------------------
-        print(f"[DEBUG] Total received: {len(response_data)} bytes")
         if content_length is not None:
-            print(f"[DEBUG] Content-Length: {content_length} bytes")
             body_received = len(response_data) - header_end_pos
-            print(f"[DEBUG] Body received: {body_received} bytes")
-        print(response_data)
 
         # --- 6. Parse and return -------------------------------------------
         if not response_data:
