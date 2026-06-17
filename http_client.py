@@ -24,87 +24,102 @@ class NetworkHttpClient:
 
     def send_barcode(self, barcode: str) -> bool:
         """
-        Send a barcode string to the remote server via an HTTP GET request.
-
-        The method constructs a raw HTTP/1.1 request, writes it to the UART,
-        then aggregates the response until a short inter‑byte timeout indicates
-        the end of the transmission.
-
-        :param barcode: The scanned code to be sent (appended to the API path).
-        :return: True if the server responded with a positive verdict (allowed),
-                 False otherwise (timeout, parsing error, or negative response).
+        Send a barcode to the server and wait for the full HTTP response.
+        Uses Content-Length header to determine exactly how many bytes to read.
         """
-        # --- 1. Build the HTTP GET request ----------------------------------
+        # --- 1. Build HTTP request ------------------------------------------
         raw_path = self.cfg.get("api_path", "/api/data")
         target_ip = self.cfg.get("target_ip", "192.168.100.70")
         target_port = self.cfg.get("target_port", 80)
 
-        # Ensure the API path starts with a slash
         api_path = raw_path if raw_path.startswith("/") else "/" + raw_path
-
-        # Build Host header: include port only if non‑standard (not 80)
         host_header = f"{target_ip}:{target_port}" if int(target_port) != 80 else target_ip
 
-        # Raw HTTP/1.1 GET request with "Connection: close" – server will close the socket
-        # after sending the response, which makes the end of data easy to detect.
         http_packet = (
             f"GET {api_path}/{barcode} HTTP/1.1\r\n"
             f"Host: {host_header}\r\n"
             "Connection: close\r\n\r\n"
         )
 
-        # --- 2. Send the request --------------------------------------------
+        # --- 2. Flush UART buffer before sending ----------------------------
+        while self.driver.uart.in_waiting:
+            _ = self.driver.uart.read(self.driver.uart.in_waiting)
+
+        # --- 3. Send the request --------------------------------------------
         try:
             self.driver.uart.write(http_packet.encode("utf-8"))
         except Exception:
-            # Write failed (e.g., UART not ready, disconnected). Return False silently.
             return False
 
-        # --- 3. Receive and aggregate the response -------------------------
-        # Timing strategy:
-        # - Total timeout for first byte: 3 seconds.
-        # - Once data starts arriving, wait for a 100 ms gap between bytes.
-        #   This gap indicates the end of transmission (since the server
-        #   closes the connection after sending the full response).
-        start_time = time.monotonic()
+        # --- 4. Read response (headers + body) ------------------------------
         response_data = b""
-        last_data_time = start_time  # last time a byte was received
+        start_time = time.monotonic()
+        total_timeout = 10.0
+        header_found = False
+        content_length = None
+        header_end_pos = -1
 
+        # Read all data until we have the full response
         while True:
-            # How many bytes are waiting in the UART receive buffer?
-            in_waiting = self.driver.uart.in_waiting
+            # Global timeout protection
+            if (time.monotonic() - start_time) > total_timeout:
+                print(f"[TIMEOUT] Total timeout exceeded")
+                return False
 
-            if in_waiting > 0:
-                # Read all available bytes at once (non‑blocking because we check in_waiting first)
-                chunk = self.driver.uart.read(in_waiting)
+            if self.driver.uart.in_waiting:
+                chunk = self.driver.uart.read(self.driver.uart.in_waiting)
                 if chunk:
                     response_data += chunk
-                    last_data_time = time.monotonic()
-            else:
-                if len(response_data) == 0:
-                    # No data received yet – check total timeout (3 seconds)
-                    if (time.monotonic() - start_time) > 3.0:
-                        return False  # Complete timeout: no response at all
-                    time.sleep(0.01)  # Short delay to avoid busy looping
-                else:
-                    # Data has arrived, but now the line is idle.
-                    # If the idle period exceeds 100 ms, we consider the transmission finished.
-                    if (time.monotonic() - last_data_time) > 0.10:
-                        break
-                    time.sleep(0.005)  # Very short sleep while waiting for more bytes
 
-        # --- 4. Parse the HTTP response -------------------------------------
+                    # Try to find headers and Content-Length if not yet found
+                    if not header_found:
+                        if b"\r\n\r\n" in response_data:
+                            header_found = True
+                            header_end_pos = response_data.find(b"\r\n\r\n") + 4
+                            
+                            # Parse Content-Length from headers
+                            header_part = response_data[:header_end_pos]
+                            for line in header_part.split(b"\r\n"):
+                                if line.lower().startswith(b"content-length:"):
+                                    try:
+                                        content_length = int(line.split(b":")[1].strip())
+                                    except ValueError:
+                                        content_length = None
+                                    break
+                            
+                            # If Content-Length found, calculate how much body we need
+                            if content_length is not None:
+                                body_received = len(response_data) - header_end_pos
+                                # If we already have the full body, we can break
+                                if body_received >= content_length:
+                                    break
+            else:
+                # No data available – short sleep to avoid busy loop
+                time.sleep(0.005)
+
+            # If we have headers and Content-Length, check if we got the full body
+            if header_found and content_length is not None:
+                body_received = len(response_data) - header_end_pos
+                if body_received >= content_length:
+                    break
+
+        # --- 5. Debug output ------------------------------------------------
+        print(f"[DEBUG] Total received: {len(response_data)} bytes")
+        if content_length is not None:
+            print(f"[DEBUG] Content-Length: {content_length} bytes")
+            body_received = len(response_data) - header_end_pos
+            print(f"[DEBUG] Body received: {body_received} bytes")
+        print(response_data)
+
+        # --- 6. Parse and return -------------------------------------------
         if not response_data:
-            return False  # No data received after timeout
+            return False
 
         try:
-            # Decode the raw bytes to a UTF-8 string (ignore any non‑UTF characters)
             full_text = response_data.decode("utf-8", "ignore")
-            # Extract the HTTP body (everything after the first blank line)
             json_body = ResponseParser.extract_http_body(full_text)
-            # Parse the verdict (true/false) from the JSON body
             allowed = ResponseParser.parse_verdict(json_body)
             return allowed
-        except Exception:
-            # Parsing error (malformed HTTP, invalid JSON, etc.)
+        except Exception as e:
+            print(f"[ERROR] Parse error: {e}")
             return False
